@@ -1,0 +1,45 @@
+------- join station and volume table
+
+SELECT
+    table_a.*, table_b."Latitude"
+FROM
+    volume.al_2022 as table_a
+INNER JOIN station.al_2022 as table_b
+ON table_a.station_id = table_b."Station_Id";
+
+
+------- create geometry with Lat/Long using ST_MakePoint and then convert to geometry
+alter table station.al_2022 add column latitude double precision, add column longitude double precision;
+update station.al_2022 set latitude = "Latitude"::integer / 1E06, longitude = "Longitude"::integer / 1E06 * -1;
+
+alter table station.al_2022 drop column if exists geom;
+alter table station.al_2022 add column geom geometry(point, 4326);
+update station.al_2022 set geom = ST_Transform(ST_SetSRID(ST_MakePoint(longitude, latitude), 4326), 4326);
+
+--------- convert wkt to geometry for links in OSM
+alter table geospatial.alabama add column location geometry(multilinestring, 4326);
+update geospatial.alabama SET location = ST_GeomFromText(geometry);
+
+--------- sum hourly volume over station, travel direction, and time
+select *, 
+sum(hour_00::integer) over(partition by station_id, year_record, month_record, day_record, day_of_week, travel_dir) as hour_00_vol,
+sum(hour_01::integer) over(partition by station_id, year_record, month_record, day_record, day_of_week, travel_dir) as hour_01_vol
+from volume.al_2022;
+
+-------- match line and point geometry and join table
+-- we need to create a new table that combines volumn_station with osm tables, insert record of matching osm segment to station point.
+-- before inserting record, we need to identify the closest segment to each point using ST_distance function
+-- after getting closest segment from osm, we need to use cross join to merge the identified segment record with volume_station table upon station_id and travel_dir
+CREATE TABLE accounts (
+	station_id integer,
+	travel_dir text,
+	maxspeed text ,
+	length  numeric
+);
+insert into accounts 
+select * from (select t1.station_id::integer, t1.travel_dir, t3.maxspeed, t3.length from (select * from volume.al_2022 where station_id='000001' and travel_dir='5') t1
+cross join (select t2.maxspeed, t2.length from geospatial.alabama as t2 limit 1) t3) as t4;
+
+SELECT length, maxspeed, ST_Distance(ST_GeomFromText('POINT(-114.053205 51.069644)',4326), location) 
+AS distance FROM geospatial.alabama t1 ORDER BY distance ASC LIMIT 1;
+
